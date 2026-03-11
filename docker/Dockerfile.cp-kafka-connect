@@ -94,7 +94,11 @@ FROM confluentinc/cp-kafka-connect:8.2.0
 #
 # --no-prompt: required for non-interactive docker build
 RUN confluent-hub install --no-prompt \
-    debezium/debezium-connector-postgresql:latest
+    debezium/debezium-connector-postgresql:3.1.2
+
+#  AWS S3 Sink Connector
+RUN confluent-hub install --no-prompt \
+    confluentinc/kafka-connect-s3:12.1.1
 
 # ── Kafka Connect cluster identity ───────────────────────────────────────────
 ENV CONNECT_GROUP_ID=cdc-connect-cluster

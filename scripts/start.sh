@@ -130,6 +130,8 @@ else
         --hostname cdc-kafka-connect \
         -p 8083:8083 \
         --restart unless-stopped \
+        -v "$(pwd)/config/kafka-connect/aws-credentials.properties:/etc/kafka-connect/aws-credentials.properties:ro" \
+        --env-file "$(pwd)/env.aws" \
         cdc-kafka-connect:latest
 fi
 wait_for_http "http://localhost:8083/connectors" "Kafka Connect" 120

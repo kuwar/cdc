@@ -29,3 +29,5 @@ __pycache__/
 
 # Large Binaries / Jars (Uncomment if you want to ignore the jars directory)
 jars/
+config/kafka-connect/aws-credentials.properties
+env.aws
