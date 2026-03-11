@@ -1,0 +1,102 @@
+# Dockerfile.schema-registry
+#
+# Confluent Schema Registry stores and serves Avro/JSON Schema/Protobuf schemas.
+# Every Avro message produced by Debezium contains a 5-byte magic prefix:
+#   [0x00][schema_id (4 bytes big-endian)]
+# The consumer reads the schema_id, fetches the schema from this registry
+# (cached after first fetch), and deserialises the Avro payload.
+#
+# Schema Registry stores all schemas in a compacted Kafka topic (_schemas).
+# This means Kafka must be running and healthy before Schema Registry starts.
+#
+# ── VERSION / COMPATIBILITY NOTE ──────────────────────────────────────────────
+# Confluent Platform 7.7.1 ships with an embedded Kafka 3.5 client.
+# Schema Registry is purely a KAFKA CLIENT — it reads/writes the _schemas topic
+# using the standard Kafka producer/consumer API. The Kafka client protocol is
+# backward-compatible, so 7.7.1 connects to Kafka 4.2.0 brokers without issues.
+# You do not need to match Confluent Platform version to Kafka broker version.
+
+FROM confluentinc/cp-schema-registry:8.2.0
+
+# ── Identity ──────────────────────────────────────────────────────────────────
+# Used in Schema Registry cluster coordination when running multiple SR instances.
+# Must be unique per instance. For single-instance, just match the container name.
+ENV SCHEMA_REGISTRY_HOST_NAME=cdc-schema-registry
+
+# ── Kafka connection ──────────────────────────────────────────────────────────
+# BUG IN ORIGINAL: PLAINTEXT://cdc-kafka:9092 is WRONG here.
+#
+# There are two completely different formats that look similar:
+#
+#   Kafka broker LISTENER format (broker config only):
+#     PLAINTEXT://hostname:port
+#     Used in: KAFKA_LISTENERS, KAFKA_ADVERTISED_LISTENERS
+#     This is how a BROKER defines its own endpoints.
+#
+#   Kafka CLIENT bootstrap.servers format (clients connecting TO a broker):
+#     hostname:port   ← no protocol prefix
+#     Used in: producer/consumer config, Schema Registry, Debezium
+#     The protocol is configured separately via security.protocol property.
+#
+# Schema Registry is a Kafka CLIENT. It uses the client format.
+# Writing PLAINTEXT://cdc-kafka:9092 makes Schema Registry try to connect
+# to a host literally named "PLAINTEXT" — connection fails immediately.
+#
+# Correct format: just host:port
+ENV SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS=cdc-kafka:9092
+
+# The security protocol for the Kafka connection.
+# Must match the protocol mapped to the listener on that port.
+# Our INTERNAL listener on port 9092 is mapped to PLAINTEXT in
+# KAFKA_LISTENER_SECURITY_PROTOCOL_MAP. So this must also be PLAINTEXT.
+# Being explicit here avoids the implicit default guessing.
+ENV SCHEMA_REGISTRY_KAFKASTORE_SECURITY_PROTOCOL=PLAINTEXT
+
+# ── Internal storage topic ────────────────────────────────────────────────────
+# The Kafka topic where Schema Registry stores all registered schemas.
+# Default is "_schemas". Setting explicitly makes debugging obvious:
+# you can inspect schemas with: kafka-console-consumer --topic _schemas
+# Topic is compacted (cleanup.policy=compact) — Schema Registry manages this.
+ENV SCHEMA_REGISTRY_KAFKASTORE_TOPIC=_schemas
+
+# Replication factor for the _schemas topic. Must be 1 for single-broker.
+ENV SCHEMA_REGISTRY_KAFKASTORE_TOPIC_REPLICATION_FACTOR=1
+
+# ── HTTP listener ─────────────────────────────────────────────────────────────
+# Schema Registry exposes a REST API on this address.
+# 0.0.0.0 = bind on all interfaces (reachable from other containers + host).
+# Debezium reaches it at: http://cdc-schema-registry:8081
+# Your host machine reaches it at: http://localhost:8081 (via -p 8081:8081)
+ENV SCHEMA_REGISTRY_LISTENERS=http://0.0.0.0:8081
+
+# ── Schema compatibility level ────────────────────────────────────────────────
+# Controls what schema changes are allowed when a producer registers a new
+# version of an existing schema.
+#
+# BACKWARD (default, what we use):
+#   A NEW schema can read data written with the OLD schema.
+#   Consumers upgraded first can still read old messages.
+#   Allowed changes: add optional fields (with defaults), delete fields.
+#   Forbidden: add required fields, change field types.
+#
+# FORWARD:
+#   An OLD schema can read data written with the NEW schema.
+#   Producers upgrade first, old consumers still work.
+#
+# FULL:
+#   Both BACKWARD and FORWARD simultaneously.
+#   Most restrictive. Only add/remove optional fields.
+#
+# NONE:
+#   No checks. Any schema registered. Dangerous — silent consumer breakage.
+#
+# For CDC with Debezium: BACKWARD is correct.
+# When you ADD a nullable column to a PostgreSQL table, Debezium adds a
+# nullable Avro field with a null default → backward-compatible.
+# Existing consumers (compiled against old schema) still work.
+ENV SCHEMA_REGISTRY_SCHEMA_COMPATIBILITY_LEVEL=BACKWARD
+
+# ── EXPOSE ────────────────────────────────────────────────────────────────────
+# Documentation only. Actual publishing requires -p 8081:8081 in docker run.
+# Other containers on cdc-network reach port 8081 without -p (shared network).
+EXPOSE 8081

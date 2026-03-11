@@ -1,0 +1,31 @@
+# Local Data and Logs
+postgres-data/
+kafka-logs/
+
+# Python Virtual Environment
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Mac OS specific
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+
+# IDE and Editor configurations
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Environment variables
+.env
+*.env
+
+# Large Binaries / Jars (Uncomment if you want to ignore the jars directory)
+jars/

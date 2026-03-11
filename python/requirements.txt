@@ -1,0 +1,5 @@
+certifi==2026.2.25
+confluent-kafka==2.13.2
+Faker==40.8.0
+fastavro==1.12.1
+psycopg2-binary==2.9.11

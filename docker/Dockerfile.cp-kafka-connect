@@ -1,0 +1,151 @@
+# Dockerfile.cp-kafka-connect
+#
+# Replaces: docker/Dockerfile.debezium
+# Base image: confluentinc/cp-kafka-connect:8.2.0
+#
+# ── WHY THIS REPLACES debezium/connect ───────────────────────────────────────
+#
+# debezium/connect problems encountered:
+#   1. io.confluent.connect.avro.AvroConverter NOT bundled
+#   2. confluent-hub CLI NOT available — forced manual curl/unzip workaround
+#   3. Manual JAR management: version drift, missing transitive deps, fragile
+#
+# cp-kafka-connect solves all three cleanly:
+#   1. AvroConverter IS bundled — it is a Confluent image, converter is native
+#   2. confluent-hub IS pre-installed — handles deps automatically
+#   3. One confluent-hub command installs Debezium + all required JARs
+#
+# ── WHAT cp-kafka-connect:8.2.0 BUNDLES ──────────────────────────────────────
+#
+#   Kafka Connect runtime                    Apache 2.0  (the engine)
+#   io.confluent.connect.avro.AvroConverter  CCL         already present, no install
+#   kafka-avro-serializer                    CCL         already present
+#   kafka-schema-registry-client             CCL         already present
+#   confluent-hub CLI                        CCL         for installing plugins
+#
+# NOT bundled — we install via confluent-hub below:
+#   Debezium PostgreSQL connector            Apache 2.0  must be explicitly added
+#
+# ── CRITICAL: ENV VAR NAMING DIFFERENCE ──────────────────────────────────────
+#
+# This is the most common mistake when switching from debezium/connect.
+#
+# debezium/connect used SHORT names:
+#   BOOTSTRAP_SERVERS, GROUP_ID, CONFIG_STORAGE_TOPIC, KEY_CONVERTER ...
+#
+# cp-kafka-connect requires a CONNECT_ prefix on ALL worker settings.
+# The image entrypoint translates CONNECT_X_Y_Z → x.y.z at startup:
+#   Strip "CONNECT_" prefix → lowercase → replace "_" with "."
+#
+#   CONNECT_BOOTSTRAP_SERVERS        → bootstrap.servers
+#   CONNECT_GROUP_ID                 → group.id
+#   CONNECT_CONFIG_STORAGE_TOPIC     → config.storage.topic
+#   CONNECT_KEY_CONVERTER            → key.converter
+#
+# Short names WITHOUT the prefix are silently ignored. No error, no warning.
+# This is the hardest bug to diagnose — Connect starts but behaves incorrectly.
+#
+# ── WORKER-LEVEL vs CONNECTOR-LEVEL CONVERTERS ───────────────────────────────
+#
+# Kafka Connect has two layers where converters are configured:
+#
+#   WORKER level (this Dockerfile):
+#     Applies to Connect's own three internal storage topics:
+#       debezium_connect_configs   — connector configuration
+#       debezium_connect_offsets   — WAL LSN cursor (critical for resume)
+#       debezium_connect_statuses  — connector health state
+#     → Use JsonConverter: simple, no Schema Registry dependency at startup
+#
+#   CONNECTOR level (postgres-connector.json):
+#     Applies to CDC output topics:
+#       ecommerce.public.users, .orders, .products, .order_items
+#     → Use AvroConverter: binary encoding, schema evolution via Schema Registry
+#     → Connector-level settings OVERRIDE worker-level for that connector's data
+#
+# Correct pattern (what we set here):
+#   Worker default  → JsonConverter   (internal topics, no SR needed)
+#   Connector override → AvroConverter  (CDC data topics, SR used)
+#
+# Wrong pattern (what debezium/connect had):
+#   Worker default  → AvroConverter
+#   This forces Schema Registry to be reachable at Connect STARTUP,
+#   not just at connector registration time. Fragile startup ordering.
+#
+# ── PLUGIN DIRECTORY ─────────────────────────────────────────────────────────
+#
+# cp-kafka-connect CONNECT_PLUGIN_PATH includes:
+#   /usr/share/confluent-hub-components   ← confluent-hub installs here
+#   /usr/share/java                       ← bundled Confluent JARs (Avro converter)
+#
+# Kafka Connect scans all subdirectories recursively for JARs at startup.
+# No manual path configuration needed for our plugins.
+
+FROM confluentinc/cp-kafka-connect:8.2.0
+
+# ── Install Debezium PostgreSQL Connector ─────────────────────────────────────
+# confluent-hub downloads and installs to /usr/share/confluent-hub-components/
+# It resolves ALL transitive dependencies automatically — no manual JAR hunting.
+#
+# Debezium 3.0.0 is compatible with Kafka Connect 3.x/4.x runtime.
+# Published on Confluent Hub by the Debezium team under Apache 2.0.
+#
+# We do NOT install kafka-connect-avro-converter — it is already bundled
+# in cp-kafka-connect:8.2.0 under /usr/share/java/
+#
+# --no-prompt: required for non-interactive docker build
+RUN confluent-hub install --no-prompt \
+    debezium/debezium-connector-postgresql:latest
+
+# ── Kafka Connect cluster identity ───────────────────────────────────────────
+ENV CONNECT_GROUP_ID=cdc-connect-cluster
+
+# ── Kafka bootstrap ──────────────────────────────────────────────────────────
+# INTERNAL listener — container-to-container via Docker DNS.
+# host:port only — no PLAINTEXT:// prefix (that is broker listener syntax).
+ENV CONNECT_BOOTSTRAP_SERVERS=cdc-kafka:9092
+
+# ── REST API ─────────────────────────────────────────────────────────────────
+# CONNECT_REST_ADVERTISED_HOST_NAME: what this worker advertises to the cluster.
+# Set to container name — Docker DNS resolves it regardless of IP reassignment.
+ENV CONNECT_REST_ADVERTISED_HOST_NAME=cdc-kafka-connect
+ENV CONNECT_REST_PORT=8083
+
+# ── Internal storage topics ──────────────────────────────────────────────────
+# Three compacted Kafka topics that store Connect's own operational state.
+# Custom names prevent collision if multiple Connect clusters share one broker.
+ENV CONNECT_CONFIG_STORAGE_TOPIC=debezium_connect_configs
+ENV CONNECT_OFFSET_STORAGE_TOPIC=debezium_connect_offsets
+ENV CONNECT_STATUS_STORAGE_TOPIC=debezium_connect_statuses
+
+# Must be 1 for a single-broker setup.
+ENV CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR=1
+ENV CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR=1
+ENV CONNECT_STATUS_STORAGE_REPLICATION_FACTOR=1
+
+# ── Worker-level converters (internal topics only) ────────────────────────────
+# JsonConverter for internal topics — no Schema Registry dependency at startup.
+# The Kafka Connect engine serialises its own config/offset/status messages
+# using these converters. JsonConverter keeps that self-contained.
+#
+# schemas.enable=false: do not embed schema JSON in every message.
+# Internal topics are consumed only by Connect itself — embedded schemas
+# waste space and serve no purpose here.
+#
+# CDC output topics use AvroConverter set at the CONNECTOR level
+# in postgres-connector.json — those settings override these defaults.
+ENV CONNECT_KEY_CONVERTER=org.apache.kafka.connect.json.JsonConverter
+ENV CONNECT_VALUE_CONVERTER=org.apache.kafka.connect.json.JsonConverter
+ENV CONNECT_KEY_CONVERTER_SCHEMAS_ENABLE=false
+ENV CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE=false
+
+# ── Offset flush interval ────────────────────────────────────────────────────
+# How often the WAL LSN cursor is persisted to debezium_connect_offsets.
+# 10s: worst-case replay window if Connect crashes mid-stream.
+# Debezium uses LSN comparison to deduplicate replayed events (at-least-once).
+ENV CONNECT_OFFSET_FLUSH_INTERVAL_MS=10000
+
+# ── EXPOSE ───────────────────────────────────────────────────────────────────
+# 8083 = Kafka Connect REST API (register connectors, check status).
+# register_connector.sh POSTs to http://localhost:8083/connectors from the host.
+# Other containers on cdc-network reach it via Docker DNS without -p.
+EXPOSE 8083

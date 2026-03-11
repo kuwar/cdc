@@ -1,0 +1,125 @@
+# Dockerfile.kafka
+#
+# Apache Kafka 4.2.0  ·  KRaft mode  ·  Single broker
+#
+# ── THE LISTENER PROBLEM (why we need two) ────────────────────────────────────
+#
+# Kafka has two separate listener concepts that people constantly confuse:
+#
+#   KAFKA_LISTENERS           — which address:port the broker BINDS to (server side)
+#   KAFKA_ADVERTISED_LISTENERS — what address Kafka TELLS clients to reconnect to
+#
+# The client flow has TWO steps:
+#
+#   Step 1: Client connects to the bootstrap address (your -p published port)
+#           Kafka responds: "here is my metadata, and here is where to actually send data"
+#   Step 2: Client reconnects to the ADVERTISED address to produce/consume
+#
+# If the advertised address isn't reachable by that client, the connection dies
+# at step 2 even though step 1 succeeded. This is 90% of Kafka connectivity issues.
+#
+# ── WHO CONNECTS AND FROM WHERE ───────────────────────────────────────────────
+#
+#   Client type          Reaches Kafka via        Must advertise
+#   ─────────────────────────────────────────────────────────────
+#   Other containers     Docker DNS "cdc-kafka"   cdc-kafka:9092
+#   (Debezium, SR)       same Docker network      (INTERNAL listener)
+#
+#   Host machine         localhost (127.0.0.1)    localhost:9093
+#   (Python, kafkacat)   via -p 9093:9093 NAT     (EXTERNAL listener)
+#
+# We therefore need TWO listeners + TWO advertised addresses.
+#
+# ── PORT ASSIGNMENTS ──────────────────────────────────────────────────────────
+#
+#   9092  INTERNAL    Container-to-container traffic
+#                     NOT published to host (-p). Only reachable inside Docker network.
+#
+#   9093  EXTERNAL    Host-to-container traffic
+#                     Published via -p 9093:9093. Your Python scripts use this.
+#
+#   9094  CONTROLLER  KRaft internal consensus protocol
+#                     NEVER published. Only Kafka talks to itself here.
+
+FROM apache/kafka:4.2.0
+
+# ── Broker identity ───────────────────────────────────────────────────────────
+ENV KAFKA_NODE_ID=1
+ENV KAFKA_PROCESS_ROLES=broker,controller
+
+# ── Listeners ─────────────────────────────────────────────────────────────────
+# BIND addresses: all three listeners bind to 0.0.0.0 (all interfaces on
+# the container's network stack). The port is what distinguishes them.
+ENV KAFKA_LISTENERS=INTERNAL://0.0.0.0:9092,EXTERNAL://0.0.0.0:9093,CONTROLLER://0.0.0.0:9094
+
+# ADVERTISED addresses: what Kafka tells clients to use after bootstrap.
+#   INTERNAL → cdc-kafka:9092   other containers resolve this via Docker DNS
+#   EXTERNAL → localhost:9093   host machine connects via -p NAT
+# Note: CONTROLLER is intentionally NOT in advertised listeners.
+# The controller listener is for KRaft consensus only — not for clients.
+ENV KAFKA_ADVERTISED_LISTENERS=INTERNAL://cdc-kafka:9092,EXTERNAL://localhost:9093
+
+# Map listener names → security protocols (all PLAINTEXT for local dev)
+ENV KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+
+# Which listener brokers use to talk to each other (inter-broker replication)
+ENV KAFKA_INTER_BROKER_LISTENER_NAME=INTERNAL
+
+# Which listener the KRaft controller protocol runs on
+ENV KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER
+
+# KRaft quorum: "node 1 is the controller, reachable at cdc-kafka:9094"
+# Single broker = single voter. Must match --hostname on docker run.
+ENV KAFKA_CONTROLLER_QUORUM_VOTERS=1@cdc-kafka:9094
+
+# ── Single-broker replication settings ────────────────────────────────────────
+# With only one broker, replication factor must be 1 everywhere.
+# You cannot replicate to more brokers than exist.
+ENV KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1
+ENV KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR=1
+ENV KAFKA_TRANSACTION_STATE_LOG_MIN_ISR=1
+ENV KAFKA_DEFAULT_REPLICATION_FACTOR=1
+ENV KAFKA_MIN_INSYNC_REPLICAS=1
+
+# ── Topic defaults ─────────────────────────────────────────────────────────────
+ENV KAFKA_AUTO_CREATE_TOPICS_ENABLE=false
+ENV KAFKA_NUM_PARTITIONS=1
+ENV KAFKA_LOG_RETENTION_HOURS=168
+ENV KAFKA_LOG_SEGMENT_BYTES=536870912
+
+# ── Log (data) directory ──────────────────────────────────────────────────────
+# KAFKA_LOG_DIRS is where Kafka writes ALL topic partition data.
+# This MUST match the container-side path in your -v mount:
+#   -v $(pwd)/kafka-logs:/var/lib/kafka/data
+#
+# The apache/kafka:4.x image default is /var/lib/kafka/data.
+# We set it explicitly so there is zero ambiguity between the Dockerfile
+# and the docker run command.
+#
+# Why the mount was empty before:
+#   The previous Dockerfile had only EXPOSE 9092 and no EXTERNAL listener.
+#   Kafka started, saw no valid external address, and either:
+#     a) crashed before writing any data, OR
+#     b) wrote to the correct path but the mount path was wrong
+#   Setting KAFKA_LOG_DIRS explicitly + matching the -v path fixes both.
+ENV KAFKA_LOG_DIRS=/var/lib/kafka/data
+
+# ── Fixed Cluster ID ───────────────────────────────────────────────────────────
+# KRaft requires storage to be "formatted" with a cluster ID before first start.
+# The apache/kafka entrypoint does this automatically using CLUSTER_ID.
+# Fixed value = data survives container restarts (volume already formatted).
+# Random value each run = InconsistentClusterIdException on restart.
+ENV CLUSTER_ID=MkU3OEVBNTcwNTJENDM2Qk
+
+# EXPOSE is documentation only — it does NOT open or publish any port.
+# It has zero effect on actual network behaviour.
+#
+# 9092 (INTERNAL): NOT listed here. Other containers on cdc-network can
+#                  reach it freely — all ports are open between containers
+#                  on the same Docker network. No EXPOSE needed.
+#
+# 9093 (EXTERNAL): listed as a hint that the host should use -p 9093:9093.
+#                  The actual publishing happens in docker run, not here.
+#
+# 9094 (CONTROLLER): intentionally omitted. KRaft internal only.
+EXPOSE 9093

@@ -1,0 +1,132 @@
+# Dockerfile.postgres
+#
+# PostgreSQL 18 — configured for Debezium CDC + logical replication
+#
+# ── WHAT POSTGRESQL NEEDS FOR CDC ─────────────────────────────────────────────
+#
+# 1. wal_level = logical
+#    PostgreSQL's WAL (Write-Ahead Log) has three levels:
+#      minimal  → crash recovery only, no replication at all
+#      replica  → physical streaming replication (binary page copies)
+#      logical  → decodes WAL into structured row-level events (what Debezium reads)
+#    Default is 'replica'. We MUST set 'logical' or Debezium cannot decode changes.
+#
+# 2. Replication slot
+#    A named cursor in the WAL stream. PostgreSQL holds WAL segments until the
+#    slot consumer (Debezium) confirms it has read them. Debezium creates this
+#    automatically on first connect using the slot.name in connector config.
+#
+# 3. A replication user
+#    A PostgreSQL user with REPLICATION privilege. This is a special privilege
+#    separate from superuser — it only allows connecting via the replication
+#    protocol and reading the WAL. Created in init.sql.
+#
+# 4. pg_hba.conf replication entry
+#    PostgreSQL's host-based authentication file has a separate DATABASE=replication
+#    pseudo-database that must be explicitly permitted. Without this line,
+#    Debezium's WAL connection is rejected even with correct credentials.
+#
+# 5. Publication
+#    Defines WHICH tables are included in the logical replication stream.
+#    Think of it as a filter on the WAL: "only emit changes for these tables."
+#    Created in init.sql.
+#
+# 6. REPLICA IDENTITY FULL
+#    By default, PostgreSQL only writes the primary key to the WAL before-image
+#    for UPDATE/DELETE. FULL writes the entire old row. Debezium needs FULL
+#    to provide the "before" snapshot in CDC events.
+#
+# ── DATA PERSISTENCE ──────────────────────────────────────────────────────────
+#
+# PostgreSQL stores ALL data in PGDATA (/var/lib/postgresql/data by default).
+# This includes:
+#   - Table data (heap files)
+#   - Indexes
+#   - WAL segments (/var/lib/postgresql/data/pg_wal/)
+#   - Replication slot state (/var/lib/postgresql/data/pg_replslot/)
+#   - Configuration (postgresql.conf, pg_hba.conf generated at init time)
+#   - pg_wal/ directory — the Write-Ahead Log segments
+#
+# If you don't mount PGDATA, ALL of this is lost when the container is removed.
+# We mount ./postgres-data → /var/lib/postgresql/data so data survives restarts.
+#
+# ── FILE STRUCTURE INSIDE THIS IMAGE ─────────────────────────────────────────
+#
+#   /etc/postgresql/custom.conf       our WAL/CDC settings (loaded via include)
+#   /etc/postgresql/pg_hba.conf       our auth rules (loaded via hba_file=)
+#   /docker-entrypoint-initdb.d/      SQL scripts run on first-time init
+#   /var/lib/postgresql/data/         PGDATA — all database files (mount here)
+#
+# ── USER AND PERMISSIONS ──────────────────────────────────────────────────────
+#
+# The postgres:18 image runs PostgreSQL as the 'postgres' OS user (UID 999).
+# Your mounted ./postgres-data directory must be writable by UID 999.
+# On Linux: sudo chown -R 999:999 postgres-data
+# On macOS with Docker Desktop: no chown needed (VM handles it)
+
+FROM postgres:18
+
+# ── PGDATA: explicit data directory ──────────────────────────────────────────
+# Set PGDATA explicitly so the path in our docker run -v is unambiguous.
+# This is the path you will mount: -v ./postgres-data:/var/lib/postgresql/data
+# postgres:18 default is already /var/lib/postgresql/data — we set it
+# explicitly so there is no guessing about where to mount.
+ENV PGDATA=/var/lib/postgresql/data
+
+# ── Custom configuration files ────────────────────────────────────────────────
+# /etc/postgresql/ is a safe location for our files — it exists in the image
+# and is not overwritten during init or restart.
+COPY config/postgres/custom.conf /etc/postgresql/custom.conf
+COPY config/postgres/pg_hba.conf /etc/postgresql/pg_hba.conf
+
+# ── Inject custom.conf include into PostgreSQL's template ─────────────────────
+# How PostgreSQL configuration loading works in this Docker image:
+#
+#   1. On first startup, the entrypoint runs initdb which generates
+#      /var/lib/postgresql/data/postgresql.conf from the template at
+#      /usr/share/postgresql/postgresql.conf.sample
+#
+#   2. The generated postgresql.conf is what PostgreSQL actually reads.
+#
+#   3. We append an include_if_exists directive to the TEMPLATE so that
+#      every generated postgresql.conf automatically loads our custom.conf.
+#
+#   4. include_if_exists (not include) — won't fail if the file is missing,
+#      making the container startup more resilient.
+#
+# Alternative approaches and why we don't use them:
+#
+#   ENV POSTGRES_EXTRA_OPTS="-c wal_level=logical ..."
+#     → Only passes flags to the postgres process, not persistent config.
+#       Doesn't survive pg_reload_conf(). Not clean for many settings.
+#
+#   COPY custom.conf /var/lib/postgresql/data/postgresql.conf
+#     → PGDATA doesn't exist at build time (it's created by initdb at runtime).
+#       This COPY would be overwritten by initdb on first start. Doesn't work.
+#
+#   CMD ["postgres", "-c", "wal_level=logical"]
+#     → Works for single settings but becomes unreadable for many settings.
+#       No comments, no documentation inline.
+RUN echo "" >> /usr/share/postgresql/postgresql.conf.sample && \
+    echo "# CDC custom configuration (added by Dockerfile)" >> /usr/share/postgresql/postgresql.conf.sample && \
+    echo "include_if_exists = '/etc/postgresql/custom.conf'" >> /usr/share/postgresql/postgresql.conf.sample
+
+# ── Database initialisation scripts ───────────────────────────────────────────
+# The postgres Docker image runs ALL files in /docker-entrypoint-initdb.d/
+# on the FIRST startup only (when PGDATA is empty / uninitialised).
+# Files run in alphabetical order → prefix with numbers to control sequence.
+#
+# 01_init.sql: creates debezium user, tables, REPLICA IDENTITY, publication,
+#              seeds products, creates heartbeat table.
+#
+# On subsequent restarts (PGDATA already has data), this directory is IGNORED.
+# This is the correct behaviour — you don't want to re-run CREATE TABLE every
+# time the container restarts.
+COPY config/postgres/init.sql /docker-entrypoint-initdb.d/01_init.sql
+
+# ── Port ──────────────────────────────────────────────────────────────────────
+# 5432 is the standard PostgreSQL port.
+# EXPOSE is documentation only — the actual publish happens in docker run -p.
+# Containers on the same Docker network can reach port 5432 without -p.
+# Your host machine needs -p 5432:5432 in docker run to connect from outside.
+EXPOSE 5432
