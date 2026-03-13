@@ -31,3 +31,5 @@ __pycache__/
 jars/
 config/kafka-connect/aws-credentials.properties
 env.aws
+env.minio.template
+env.minio

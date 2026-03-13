@@ -4,8 +4,8 @@
         "connector.class": "io.confluent.connect.s3.S3SinkConnector",
         "tasks.max": "4",
         "topics": "ecommerce.public.users,ecommerce.public.products,ecommerce.public.orders,ecommerce.public.order_items",
-        "s3.bucket.name": "${file:/etc/kafka-connect/aws-credentials.properties:aws.s3.bucket.name}",
-        "s3.region": "${file:/etc/kafka-connect/aws-credentials.properties:aws.s3.region}",
+        "s3.bucket.name": "${file:/etc/kafka-connect/aws-credentials.properties:s3.bucket.name}",
+        "s3.region": "${file:/etc/kafka-connect/aws-credentials.properties:s3.region}",
         "s3.part.size": "67108864",
         "storage.class": "io.confluent.connect.s3.storage.S3Storage",
         "format.class": "io.confluent.connect.s3.format.avro.AvroFormat",
@@ -28,6 +28,7 @@
         "errors.log.enable": "true",
         "errors.log.include.messages": "true",
         "errors.deadletterqueue.topic.name": "ecommerce-s3-sink-dlq",
+        "errors.deadletterqueue.topic.replication.factor": "1",
         "errors.deadletterqueue.context.headers.enable": "true",
         "consumer.override.auto.offset.reset": "earliest",
         "s3.retry.backoff.ms": "3000"

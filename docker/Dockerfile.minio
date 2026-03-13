@@ -1,0 +1,122 @@
+# docker/Dockerfile.minio
+#
+# MinIO — S3-compatible object storage for local development.
+#
+# ── WHAT MINIO IS ─────────────────────────────────────────────────────────────
+#
+# MinIO is an open-source, high-performance object storage server that
+# implements the AWS S3 API. Any client that speaks S3 — including the
+# Confluent S3 Sink connector, AWS CLI, boto3, Spark, and Athena-compatible
+# tools — works with MinIO without any code changes.
+#
+# This makes MinIO ideal for local development and CI: you get full S3
+# semantics (buckets, objects, multipart upload, presigned URLs) without
+# touching real AWS infrastructure or incurring cost.
+#
+# ── WHY THE S3 SINK CONNECTOR WORKS WITH MINIO ───────────────────────────────
+#
+# The Confluent S3 Sink connector is built on the AWS SDK for Java. Internally,
+# every S3 operation is an HTTP call to an endpoint URL. By default the SDK
+# points at AWS's global endpoint (s3.amazonaws.com or s3.<region>.amazonaws.com).
+#
+# Two connector settings redirect those calls to MinIO instead:
+#
+#   s3.endpoint             → overrides the AWS endpoint URL
+#                             set to http://cdc-minio:9000 (Docker DNS hostname)
+#
+#   s3.path.style.access    → controls URL format (see below)
+#
+# With those two settings changed, the connector is completely unaware it is
+# talking to MinIO. The same Avro file format, topic-to-prefix mapping,
+# rotation logic, and error handling all work identically.
+#
+# ── PATH-STYLE vs VIRTUAL-HOSTED-STYLE URLS ──────────────────────────────────
+#
+# AWS S3 supports two URL formats for addressing bucket objects:
+#
+#   Virtual-hosted (AWS default):
+#     https://<bucket>.s3.amazonaws.com/<key>
+#     https://ecommerce-cdc.s3.eu-west-1.amazonaws.com/raw/cdc/orders/...
+#
+#   Path-style:
+#     https://s3.amazonaws.com/<bucket>/<key>
+#     http://cdc-minio:9000/ecommerce-cdc/raw/cdc/orders/...
+#
+# Virtual-hosted style requires DNS resolution of <bucket>.<hostname>.
+# For a local Docker container, `ecommerce-cdc.cdc-minio` is not resolvable —
+# Docker DNS only knows about the hostname `cdc-minio`, not bucket sub-domains.
+#
+# Path-style puts the bucket name in the URL path instead, which works fine
+# with Docker DNS. MinIO also prefers path-style by default.
+#
+# Setting s3.path.style.access=true in the connector JSON enables path-style.
+# Without this, the connector fails with an SSL certificate or DNS error.
+#
+# ── PORTS ─────────────────────────────────────────────────────────────────────
+#
+#   9000  S3 API port — the Confluent S3 connector and AWS SDK talk here
+#   9001  MinIO Console — web UI for browsing buckets, objects, and metrics
+#
+# ── CREDENTIALS ───────────────────────────────────────────────────────────────
+#
+# MinIO uses MINIO_ROOT_USER and MINIO_ROOT_PASSWORD as the equivalent of
+# an AWS IAM root access key. These are set via environment variables at
+# container start time (passed from minio.env in start.sh).
+#
+# The S3 connector authenticates to MinIO using the same credentials, but
+# passes them as AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY — the standard
+# AWS SDK environment variables. MinIO accepts them as-is because its auth
+# protocol is the same AWS Signature V4 used by real S3.
+#
+# In minio.env, all four variables are set to the same values:
+#   MINIO_ROOT_USER     = minioadmin   ← MinIO server reads this
+#   MINIO_ROOT_PASSWORD = ...          ← MinIO server reads this
+#   AWS_ACCESS_KEY_ID   = minioadmin   ← S3 connector (AWS SDK) reads this
+#   AWS_SECRET_ACCESS_KEY = ...        ← S3 connector (AWS SDK) reads this
+#
+# ── DATA VOLUME ───────────────────────────────────────────────────────────────
+#
+# MinIO serves objects from /data inside the container.
+#
+# VOLUME ["/data"] declares /data as a persistence point at the image level.
+# This has two effects:
+#
+#   1. If docker run provides no -v mount, Docker automatically creates an
+#      anonymous volume for /data. Data still survives container restarts
+#      (it is NOT lost on container stop/rm), but it is harder to find and
+#      manage than a named volume.
+#
+#   2. It signals to anyone reading the Dockerfile that /data is stateful —
+#      the canonical way to communicate "mount something here".
+#
+# In start.sh we always supply a named volume explicitly:
+#   -v cdc-minio-data:/data
+# This overrides the anonymous volume behaviour and gives us a stable,
+# addressable volume that we can inspect, back up, and restore by name.
+#
+# Named volume location on the host (Docker Desktop on macOS):
+#   ~/Library/Containers/com.docker.docker/Data/vms/0/data/docker/volumes/
+#   cdc-minio-data/_data/
+#
+# To inspect:  docker volume inspect cdc-minio-data
+# To back up:  see scripts/backup-minio.sh
+# To wipe:     ./scripts/stop.sh --clean
+
+FROM minio/minio:RELEASE.2025-07-23T15-54-02Z
+
+# S3 API
+EXPOSE 9000
+
+# MinIO Console (web UI — browse buckets at http://localhost:9001)
+EXPOSE 9001
+
+# Declare /data as a persistence point.
+# start.sh mounts the named volume cdc-minio-data here via -v cdc-minio-data:/data.
+# Without a -v flag, Docker would create an anonymous volume automatically
+# (still persistent, but unaddressable by name).
+VOLUME ["/data"]
+
+# Start MinIO server.
+# --console-address ":9001" binds the web console to port 9001.
+# Without this flag MinIO picks a random port for the console.
+CMD ["server", "/data", "--console-address", ":9001"]
