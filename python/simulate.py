@@ -17,6 +17,7 @@ import time
 import random
 import logging
 import argparse
+import uuid
 from datetime import datetime
 import psycopg2
 import psycopg2.extras
@@ -67,7 +68,7 @@ def register_user(conn) -> dict:
     Debezium emits: op=c  topic=ecommerce.public.users
     """
     name  = fake.name()
-    email = fake.unique.email()
+    email = f"{fake.user_name()}+{uuid.uuid4().hex[:8]}@{fake.free_email_domain()}"
 
     user = execute(conn, """
         INSERT INTO users (name, email)
