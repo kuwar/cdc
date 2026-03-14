@@ -6,10 +6,9 @@
         "topics": "ecommerce.public.users,ecommerce.public.products,ecommerce.public.orders,ecommerce.public.order_items",
         "s3.bucket.name": "ecommerce-cdc",
         "s3.region": "us-east-1",
-        "s3.endpoint": "http://cdc-minio:9000",
-        "s3.path.style.access": "true",
-        "aws.access.key.id": "minioadmin",
-        "aws.secret.access.key": "minioadmin123",
+        "store.url": "http://cdc-minio:9000",
+        "s3.path.style.access.enabled": "true",
+        "s3.credentials.provider.class": "software.amazon.awssdk.auth.credentials.EnvironmentVariableCredentialsProvider",
         "storage.class": "io.confluent.connect.s3.storage.S3Storage",
         "format.class": "io.confluent.connect.s3.format.avro.AvroFormat",
         "key.converter": "io.confluent.connect.avro.AvroConverter",
@@ -22,6 +21,9 @@
         "timestamp.field": "ts_ms",
         "topics.dir": "raw/cdc",
         "directory.delim": "/",
-        "path.format": "'year'=YYYY/'month'=MM/'day'=dd/'hour'=HH"
+        "path.format": "'year'=YYYY/'month'=MM/'day'=dd/'hour'=HH",
+        "locale": "en_US",
+        "timezone": "UTC",
+        "s3.part.size": "5242880"
     }
 }
