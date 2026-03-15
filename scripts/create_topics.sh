@@ -66,6 +66,20 @@ create_topic "ecommerce.public.products"     3
 create_topic "ecommerce.public.orders"       3
 create_topic "ecommerce.public.order_items"  3
 
+# Debezium heartbeat topic — must exist before the connector starts.
+# Debezium publishes heartbeat events here to advance the replication slot LSN
+# when business tables are idle. Without this topic the slot LSN never advances,
+# causing WAL accumulation. 1 partition is sufficient (no ordering requirement).
+docker exec cdc-kafka "$KAFKA_TOPICS" \
+    --bootstrap-server "$BOOTSTRAP" \
+    --create \
+    --if-not-exists \
+    --topic __debezium-heartbeat.ecommerce \
+    --partitions 1 \
+    --replication-factor 1 \
+    --config cleanup.policy=delete \
+    --config retention.ms=86400000
+
 echo "[CDC] Topics created:"
 docker exec cdc-kafka "$KAFKA_TOPICS" \
     --bootstrap-server "$BOOTSTRAP" \

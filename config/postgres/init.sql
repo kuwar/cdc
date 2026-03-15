@@ -93,7 +93,7 @@ ALTER TABLE order_items  REPLICA IDENTITY FULL;
 -- Debezium can create this automatically, but explicit creation gives us control.
 -- FOR ALL TABLES: captures all current and future tables.
 -- Alternative: FOR TABLE users, products, orders, order_items (explicit list).
-CREATE PUBLICATION debezium_pub FOR TABLE users, products, orders, order_items;
+CREATE PUBLICATION debezium_pub FOR TABLE users, products, orders, order_items, debezium_heartbeat;
 
 -- ── Seed products ─────────────────────────────────────────────────────────────
 -- Pre-populate product catalogue so simulate.py can place orders immediately.
