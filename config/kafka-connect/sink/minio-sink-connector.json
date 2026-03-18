@@ -17,6 +17,7 @@
         "value.converter.schema.registry.url": "http://cdc-schema-registry:8081",
         "flush.size": "100",
         "rotate.interval.ms": "10000",
+        "partitioner.class": "io.confluent.connect.storage.partitioner.TimeBasedPartitioner",
         "timestamp.extractor": "RecordField",
         "timestamp.field": "ts_ms",
         "topics.dir": "raw/cdc",
