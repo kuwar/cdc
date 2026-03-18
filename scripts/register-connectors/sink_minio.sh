@@ -34,7 +34,7 @@ source "$SCRIPT_DIR/_lib.sh"
 FORCE="${1:-}"
 
 CONNECTOR_NAME="ecommerce-minio-sink"
-CONNECTOR_CONFIG="config/kafka-connect/sink/minio-sink-connector.json"
+CONNECTOR_CONFIG="config/kafka-connect/sink/minio-connector.json"
 
 register_connector "$CONNECTOR_NAME" "$CONNECTOR_CONFIG" "$FORCE"
 print_status

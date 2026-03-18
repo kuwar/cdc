@@ -195,7 +195,7 @@ fi
 #   Uses env.minio for credentials (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY
 #   map to MinIO root credentials). The aws-credentials.properties file is
 #   still mounted so the FileConfigProvider can start cleanly, but the active
-#   connector uses minio-sink-connector.json which does not reference it.
+#   connector uses minio-connector.json which does not reference it.
 #
 # VARIANT B: AWS S3 (real cloud)
 #   Uses env.aws for real IAM credentials. The aws-credentials.properties file

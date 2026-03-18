@@ -1,6 +1,6 @@
 # CDC E-Commerce Pipeline
 
-A production-grade **Change Data Capture (CDC)** pipeline that streams real-time database changes from PostgreSQL into Apache Kafka and AWS S3, using Debezium, Confluent Schema Registry, and Avro serialisation.
+A production-grade **Change Data Capture (CDC)** pipeline that streams real-time database changes from PostgreSQL into Apache Kafka and S3-compatible object storage, using Debezium, Confluent Schema Registry, and Avro serialisation.
 
 Built as a portfolio project demonstrating senior data engineering patterns: event-driven architecture, schema evolution, exactly-once semantics, and cloud sink integration — all running locally via Docker.
 
@@ -32,7 +32,8 @@ This pipeline captures every `INSERT`, `UPDATE`, and `DELETE` from a simulated e
 - CDC via PostgreSQL logical replication (WAL) using Debezium
 - Schema-on-write with Confluent Schema Registry and Avro
 - Kafka in KRaft mode (no ZooKeeper) with multi-listener networking
-- Sink connector streaming Avro CDC events to AWS S3 as partitioned files
+- Sink connector streaming Avro CDC events to S3-compatible object storage, partitioned by event time
+- Local S3 simulation via MinIO (switchable to real AWS S3)
 - Least-privilege database design (dedicated replication user, scoped publication)
 - Heartbeat-driven WAL slot management to prevent disk bloat
 - Dead-letter queue handling for sink connector failures
@@ -50,7 +51,10 @@ Kafka Topics (one per table)
     │
     ├──▶  Python Consumer    (real-time terminal output)
     │
-    └──▶  S3 Sink Connector  (partitioned Avro files on AWS S3)
+    └──▶  S3 Sink Connector  (partitioned Avro files)
+              │
+              ├──▶  MinIO  (default — local S3-compatible storage)
+              └──▶  AWS S3 (optional — real cloud sink)
 ```
 
 ---
@@ -62,7 +66,7 @@ Kafka Topics (one per table)
 │                          cdc-network (Docker bridge)                │
 │                                                                     │
 │  ┌──────────────┐    WAL stream     ┌───────────────────────────┐  │
-│  │              │ ←──────────────── │  cdc-kafka-connect       │  │
+│  │              │ ←──────────────── │  cdc-kafka-connect        │  │
 │  │  cdc-postgres│                   │   cp-kafka-connect:8.2.0  │  │
 │  │  postgres:18 │                   │                           │  │
 │  │  port 5432   │                   │  ┌─────────────────────┐  │  │
@@ -84,18 +88,26 @@ Kafka Topics (one per table)
 │  │  _schemas (compacted)│           │   ecommerce.public.users  │  │
 │  └──────────────────────┘           │   ecommerce.public.orders │  │
 │                                     │   ecommerce.public.       │  │
-│                                     │     products              │  │
-│                                     │   ecommerce.public.       │  │
-│                                     │     order_items           │  │
-│                                     └───────────────────────────┘  │
+│  ┌──────────────────────┐           │     products              │  │
+│  │  cdc-minio           │◀──────────│   ecommerce.public.       │  │
+│  │  MinIO (S3-compat.)  │  objects  │     order_items           │  │
+│  │  :9000 (S3 API)      │           └───────────────────────────┘  │
+│  │  :9001 (Console)     │                                           │
+│  └──────────────────────┘                                           │
 └─────────────────────────────────────────────────────────────────────┘
 
   Host machine:
     Python consumer  →  localhost:9093 (Kafka EXTERNAL listener)
     Python simulator →  localhost:5432 (PostgreSQL)
     Scripts          →  localhost:8083 (Kafka Connect REST API)
+    MinIO Console    →  http://localhost:9001 (browse stored files)
 
-  AWS S3:
+  MinIO S3 output layout (default):
+    ecommerce-cdc/raw/cdc/
+      ecommerce.public.orders/year=2026/month=03/day=10/hour=14/
+        ecommerce.public.orders+0+000000000.avro
+
+  AWS S3 output layout (optional, same structure):
     s3://your-bucket/raw/cdc/
       ecommerce.public.orders/year=2026/month=03/day=10/hour=14/
         ecommerce.public.orders+0+000000000.avro
@@ -120,7 +132,7 @@ Every Kafka message produced by Debezium follows this Avro envelope:
 ```json
 {
   "op":     "c | u | d | r",
-  "before": { ... } ,
+  "before": { ... },
   "after":  { ... },
   "source": {
     "table": "orders",
@@ -139,64 +151,77 @@ Every Kafka message produced by Debezium follows this Avro envelope:
 
 ## Tech Stack
 
-| Component            | Technology                          | Version |
-|----------------------|-------------------------------------|---------|
-| Message broker       | Apache Kafka (KRaft mode)           | 4.2.0   |
-| CDC connector        | Debezium PostgreSQL Source          | 3.1.2   |
-| Connect runtime      | Confluent cp-kafka-connect          | 8.2.0   |
-| Schema registry      | Confluent cp-schema-registry        | 8.2.0   |
-| Serialisation        | Apache Avro                         | —       |
-| Source database      | PostgreSQL                          | 18      |
-| Cloud sink           | Confluent S3 Sink Connector         | 12.1.2 |
-| Cloud storage        | AWS S3                              | —       |
+| Component            | Technology                          | Version  |
+|----------------------|-------------------------------------|----------|
+| Message broker       | Apache Kafka (KRaft mode)           | 4.2.0    |
+| CDC connector        | Debezium PostgreSQL Source          | 3.1.2    |
+| Connect runtime      | Confluent cp-kafka-connect          | 8.2.0    |
+| Schema registry      | Confluent cp-schema-registry        | 8.2.0    |
+| Serialisation        | Apache Avro                         | —        |
+| Source database      | PostgreSQL                          | 18       |
+| Cloud sink connector | Confluent S3 Sink Connector         | 12.1.1   |
+| Local object storage | MinIO (S3-compatible)               | latest   |
+| Cloud storage        | AWS S3 (optional)                   | —        |
 | Python Kafka client  | confluent-kafka                     | 2.13.2   |
-| Container runtime    | Docker                              | 29.1.3     |
+| Container runtime    | Docker                              | 29.1.3   |
 
 ---
 
 ## Project Structure
 
 ```
-cdc-ecommerce/
+cdc/
 │
 ├── docker/                          # Dockerfile per service
 │   ├── Dockerfile.kafka             # apache/kafka:4.2.0 with KRaft config
 │   ├── Dockerfile.postgres          # postgres:18 with CDC config + schema
-│   ├── Dockerfile.cp-schema-registry   # cp-schema-registry:8.2.0
-│   └── Dockerfile.cp-kafka-connect    # cp-kafka-connect:8.2.0
-│                                    #   + Debezium(Maven Central)
-│                                    #   + S3 Sink(Confluent Hub)
+│   ├── Dockerfile.cp-schema-registry
+│   ├── Dockerfile.cp-kafka-connect  # cp-kafka-connect:8.2.0
+│   │                                #   + Debezium PG Source (Maven Central)
+│   │                                #   + S3 Sink (Confluent Hub)
+│   └── Dockerfile.minio             # MinIO local S3 server
 │
 ├── config/
 │   ├── postgres/
 │   │   ├── init.sql                 # Schema, users, publication, seed data
 │   │   ├── custom.conf              # PostgreSQL CDC tuning (wal_level=logical)
 │   │   └── pg_hba.conf              # Host-based auth rules
-│   ├── debezium/
-│   │   ├── postgres-connector.json  # Debezium source connector config
-│   │   └── s3-sink-connector.json   # S3 sink connector config
 │   └── kafka-connect/
-│   |    |── source/
-│   |    |   └── postgres-connector.json
-│   |    |── sink/
-│   |    |   └── s3-sink-connector.json
-│   |    |── aws-credentials.properties.template   # S3 bucket + region
+│       ├── source/
+│       │   └── postgres-connector.json      # Debezium source connector config
+│       ├── sink/
+│       │   ├── minio-connector.json         # MinIO sink (default)
+│       │   └── s3-connector.json            # AWS S3 sink (optional)
+│       ├── aws-credentials.properties       # S3 bucket + region (not secret)
+│       └── aws-credentials.properties.template
 │
 ├── scripts/
 │   ├── build.sh                     # Build all (or one) Docker image(s)
 │   ├── start.sh                     # Start stack, idempotent
-│   ├── stop.sh                      # Stop stack, preserve volumes
-│   ├── create_topics.sh             # Pre-create Kafka topics with compact policy
-│   └── register_connector.sh        # Register source and/or sink connectors
+│   ├── stop.sh                      # Stop stack (--clean wipes volumes)
+│   ├── create_topics.sh             # Pre-create Kafka topics
+│   ├── minio_entrypoint.sh          # MinIO container entrypoint
+│   ├── register_connector.sh        # Orchestrator: register source/sink/all
+│   └── register-connectors/
+│       ├── _lib.sh                  # Shared helpers
+│       ├── source_postgres.sh       # Register Debezium source connector
+│       ├── sink_minio.sh            # Register MinIO sink (default)
+│       └── sink_aws_s3.sh           # Register AWS S3 sink (optional)
 │
 ├── python/
 │   ├── config.py                    # Bootstrap, Schema Registry, DB connection
-│   ├── simulate.py                  # E-commerce workload generator
+│   ├── simulate.py                  # E-commerce workload generator (--loops N)
 │   ├── consumer.py                  # Real-time CDC event terminal viewer
 │   └── requirements.txt
 │
+├── jars/                            # Pre-downloaded connector JARs
+│   ├── debezium-debezium-connector-postgresql-3.1.2/
+│   └── confluentinc-kafka-connect-s3-12.1.1/
+│
+├── env.minio.template               # MinIO credentials template (copy → env.minio)
+├── env.aws.template                 # AWS credentials template  (copy → env.aws)
+├── BASHSCRIPT.md                    # Bash scripting notes (project-specific)
 └── README.md
-|── env.aws                     # AWS credentials (never commit)
 ```
 
 ---
@@ -207,11 +232,12 @@ cdc-ecommerce/
 |-----------------|-----------------|----------------------------|
 | Docker Desktop  | 29.1.3          | `docker --version`         |
 | Python          | 3.14.2          | `python --version`         |
-| AWS CLI         | 2.34.6          | `aws --version`            |
 | `nc` (netcat)   | any             | `nc -h`                    |
 | `curl`          | any             | `curl --version`           |
 
-Docker Desktop must be **running** before executing any script. The pipeline uses ~3 GB RAM across all containers. Recommended: 6 GB allocated to Docker.
+AWS CLI is only required if using the real AWS S3 sink variant.
+
+Docker Desktop must be **running** before executing any script. The pipeline uses ~3–4 GB RAM across all containers. Recommended: 6 GB allocated to Docker.
 
 ---
 
@@ -232,26 +258,32 @@ source venv/bin/activate           # Windows: venv\Scripts\activate
 pip install -r python/requirements.txt
 ```
 
-### 3. Configure AWS credentials
+### 3. Configure credentials
 
-This step is only required for the S3 sink connector. Skip if running Kafka + PostgreSQL only.
+**MinIO (default — local, no cloud account needed):**
 
 ```bash
-# Copy templates
-cp config/kafka-connect/aws-credentials.properties.template \
-   config/kafka-connect/aws-credentials.properties
-
-cp env.aws.template \
-   env.aws
-
-# Add real values — see Configuration section below
+cp env.minio.template env.minio
+# The defaults in the template work out of the box — no changes required
 ```
 
-Then add both files to `.gitignore`:
+**AWS S3 (optional — real cloud sink):**
 
 ```bash
+cp env.aws.template env.aws
+# Fill in AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY
+
+cp config/kafka-connect/aws-credentials.properties.template \
+   config/kafka-connect/aws-credentials.properties
+# Fill in aws.s3.bucket.name and aws.s3.region
+```
+
+Add secrets to `.gitignore`:
+
+```bash
+echo "env.minio"  >> .gitignore
+echo "env.aws"    >> .gitignore
 echo "config/kafka-connect/aws-credentials.properties" >> .gitignore
-echo "env.aws"                    >> .gitignore
 ```
 
 ### 4. Build Docker images
@@ -261,7 +293,7 @@ chmod +x scripts/*.sh
 ./scripts/build.sh
 ```
 
-Build time is ~3–5 minutes on first run (downloads Debezium plugin ZIP and S3 connector from the internet). Subsequent builds use the Docker layer cache and complete in seconds.
+Build time is ~3–5 minutes on first run (downloads connector plugins from the internet). Subsequent builds use the Docker layer cache and complete in seconds.
 
 ### 5. Start the stack
 
@@ -269,7 +301,7 @@ Build time is ~3–5 minutes on first run (downloads Debezium plugin ZIP and S3 
 ./scripts/start.sh
 ```
 
-This script is **idempotent** — running it multiple times is safe. It checks whether each container already exists before creating it, and skips connector registration if the connector is already `RUNNING`.
+This script is **idempotent** — safe to run multiple times. It checks whether each container already exists before creating it, creates the MinIO bucket if absent, and skips connector registration if connectors are already `RUNNING`.
 
 ### 6. Verify all services are up
 
@@ -287,33 +319,64 @@ curl -s http://localhost:8083/connector-plugins | python3 -m json.tool
 # Connector status
 curl -s http://localhost:8083/connectors/ecommerce-postgres-cdc/status \
   | python3 -m json.tool
+
+# MinIO — open the console in a browser
+open http://localhost:9001   # login: minioadmin / minioadmin123
 ```
 
 ---
 
 ## Configuration
 
-### AWS Credentials
+### Sink Mode: MinIO vs AWS S3
 
-Credentials are split across two files to prevent secrets from appearing in connector logs (Kafka Connect logs every config property at startup).
+The pipeline ships with **two sink configurations**. MinIO is active by default.
 
-**`config/kafka-connect/aws-credentials.properties`** — not secret, safe to appear in logs:
+| | MinIO (default) | AWS S3 (optional) |
+|---|---|---|
+| Connector name | `ecommerce-minio-sink` | `ecommerce-s3-sink` |
+| Config file | `config/kafka-connect/sink/minio-connector.json` | `config/kafka-connect/sink/s3-connector.json` |
+| Credentials file | `env.minio` | `env.aws` |
+| Storage endpoint | `http://cdc-minio:9000` | AWS default |
+| Registration script | `scripts/register-connectors/sink_minio.sh` | `scripts/register-connectors/sink_aws_s3.sh` |
+
+To switch to AWS S3:
+
+1. Populate `env.aws` and `config/kafka-connect/aws-credentials.properties`
+2. In `scripts/start.sh` (Step 6), comment out VARIANT A and uncomment VARIANT B
+3. In `scripts/register_connector.sh`, change `run_sink()` to call `sink_aws_s3.sh`
+4. Recreate the Kafka Connect container: `docker stop cdc-kafka-connect && docker rm cdc-kafka-connect && ./scripts/start.sh`
+
+### MinIO Credentials
+
+**`env.minio`** — used by both the MinIO server and the S3 connector:
 
 ```properties
-s3.bucket.name=your-ecommerce-cdc-bucket
-s3.region=eu-west-1
+MINIO_ROOT_USER=minioadmin
+MINIO_ROOT_PASSWORD=minioadmin123
+AWS_ACCESS_KEY_ID=minioadmin
+AWS_SECRET_ACCESS_KEY=minioadmin123
 ```
 
-**`env.aws`** — secret, never commit, never logs:
+The MinIO server reads `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD`. The AWS SDK inside the connector reads `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` — set to the same values so the connector authenticates with MinIO.
+
+### AWS Credentials (S3 sink only)
+
+Credentials are split across two files to prevent secrets from appearing in connector logs.
+
+**`config/kafka-connect/aws-credentials.properties`** — not secret:
+
+```properties
+aws.s3.bucket.name=your-ecommerce-cdc-bucket
+aws.s3.region=eu-west-1
+```
+
+**`env.aws`** — secret, never commit:
 
 ```properties
 AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE
 AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
 ```
-
-Get the key ID and secret from: **AWS Console → IAM → Users → your user → Security credentials → Create access key**. The secret is shown only once at creation time.
-
-The `env.aws` file is passed to the Kafka Connect container via `--env-file` in `start.sh`. The AWS SDK inside the S3 connector reads `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` automatically from the environment via the Default Credential Provider Chain — credentials never appear in connector config or logs.
 
 ### IAM Policy for S3 Sink
 
@@ -341,8 +404,6 @@ Attach this policy to your IAM user or role:
 
 ### Connector Configuration
 
-Both connector configs live in `config/debezium/` and are registered via the Kafka Connect REST API — they are not baked into the image.
-
 Key settings in `postgres-connector.json`:
 
 | Setting | Value | Why |
@@ -353,16 +414,16 @@ Key settings in `postgres-connector.json`:
 | `heartbeat.interval.ms` | `10000` | Prevent WAL slot from falling behind when tables are idle |
 | `decimal.handling.mode` | `double` | Consistent numeric type in Avro across all consumers |
 
-Key settings in `s3-sink-connector.json`:
+Key settings in `minio-connector.json` (same apply to `s3-connector.json`):
 
 | Setting | Value | Why |
 |---------|-------|-----|
 | `format.class` | `AvroFormat` | Avro container files readable by Spark, Athena, Glue |
-| `flush.size` | `1000` | Close and upload file after 1000 records |
-| `rotate.interval.ms` | `60000` | Also flush if 60 seconds pass (handles low-volume periods) |
+| `flush.size` | `100` (MinIO) / `1000` (S3) | Close and upload file after N records |
+| `rotate.interval.ms` | `10000` (MinIO) / `60000` (S3) | Also flush after this many ms (handles low-volume periods) |
 | `timestamp.extractor` | `RecordField` | Partition by event time (`ts_ms`), not processing time |
 | `path.format` | `year=YYYY/month=MM/day=dd/hour=HH` | Hive-compatible partitioning for Athena/Glue |
-| `errors.deadletterqueue.topic.name` | `ecommerce-s3-sink-dlq` | Failed messages routed here instead of blocking the connector |
+| `errors.deadletterqueue.topic.name` | `ecommerce-s3-sink-dlq` | Failed messages routed here instead of blocking (S3 sink only) |
 
 ---
 
@@ -416,19 +477,24 @@ bash scripts/register_connector.sh sink
 
 # Force delete and re-register (use after changing connector config)
 bash scripts/register_connector.sh --force
+
+# Individual connector scripts (can be called directly)
+bash scripts/register-connectors/source_postgres.sh [--force]
+bash scripts/register-connectors/sink_minio.sh      [--force]
+bash scripts/register-connectors/sink_aws_s3.sh     [--force]
 ```
 
 ### Stopping the stack
 
 ```bash
-# Stop containers, preserve Kafka and PostgreSQL data volumes
+# Stop containers, preserve all data volumes
 ./scripts/stop.sh
 
 # Full teardown — wipe all volumes and network (fresh start next time)
 ./scripts/stop.sh --clean
 ```
 
-> **Note:** `stop.sh` without `--clean` preserves both Docker volumes (`cdc-kafka-data`, `cdc-postgres-data`). On next `start.sh`, Debezium resumes from the last committed WAL LSN — no re-snapshot, no duplicate events.
+> **Note:** `stop.sh` without `--clean` preserves `cdc-kafka-data`, `cdc-postgres-data`, and `cdc-minio-data`. On next `start.sh`, Debezium resumes from the last committed WAL LSN — no re-snapshot, no duplicate events.
 
 ---
 
@@ -436,18 +502,23 @@ bash scripts/register_connector.sh --force
 
 ### Service endpoints
 
-| Service         | URL / Address          | Purpose                     |
-|-----------------|------------------------|-----------------------------|
-| Kafka (external)| `localhost:9093`       | Host machine clients (Python, CLI) |
-| Schema Registry | `http://localhost:8081`| Schema CRUD, compatibility  |
-| PostgreSQL      | `localhost:5432`       | DB: `ecommerce`, user: `ecommerce_user` |
-| Kafka Connect   | `http://localhost:8083`| Connector REST API          |
+| Service              | URL / Address           | Purpose                              |
+|----------------------|-------------------------|--------------------------------------|
+| Kafka (external)     | `localhost:9093`        | Host machine clients (Python, CLI)   |
+| Schema Registry      | `http://localhost:8081` | Schema CRUD, compatibility checks    |
+| PostgreSQL           | `localhost:5432`        | DB: `ecommerce`, user: `ecommerce_user` |
+| Kafka Connect        | `http://localhost:8083` | Connector REST API                   |
+| MinIO S3 API         | `http://localhost:9000` | S3-compatible object storage         |
+| MinIO Console        | `http://localhost:9001` | Web UI — browse stored Avro files    |
 
 ### Kafka Connect REST API quick reference
 
 ```bash
 # Check connector status (most useful first command when debugging)
 curl -s http://localhost:8083/connectors/ecommerce-postgres-cdc/status \
+  | python3 -m json.tool
+
+curl -s http://localhost:8083/connectors/ecommerce-minio-sink/status \
   | python3 -m json.tool
 
 # Restart a failed task
@@ -488,10 +559,10 @@ docker exec cdc-kafka /opt/kafka/bin/kafka-console-consumer.sh \
   --from-beginning
 ```
 
-### S3 output layout
+### MinIO output layout
 
 ```
-s3://your-bucket/
+ecommerce-cdc/
 └── raw/cdc/
     ├── ecommerce.public.users/
     │   └── year=2026/month=03/day=10/hour=14/
@@ -501,7 +572,7 @@ s3://your-bucket/
     └── ecommerce.public.order_items/
 ```
 
-Files are Hive-compatible Avro containers. Query directly with AWS Athena after creating a Glue crawler over the `raw/cdc/` prefix.
+Files are Hive-compatible Avro containers, identical in format to the AWS S3 output. Browse them at `http://localhost:9001` (MinIO Console) or query with `mc` (MinIO Client).
 
 ---
 
@@ -511,16 +582,17 @@ Files are Hive-compatible Avro containers. Query directly with AWS Athena after 
 
 1. Add `CREATE TABLE` and `ALTER TABLE ... REPLICA IDENTITY FULL` to `config/postgres/init.sql`
 2. Add the table to `CREATE PUBLICATION debezium_pub FOR TABLE ...` in `init.sql`
-3. Add the table name to `table.include.list` in `config/debezium/postgres-connector.json`
-4. Add the Kafka topic name to `topics` in `config/debezium/s3-sink-connector.json`
+3. Add the table name to `table.include.list` in `config/kafka-connect/source/postgres-connector.json`
+4. Add the Kafka topic name to `topics` in the relevant sink connector JSON
 5. Run `./scripts/stop.sh --clean && ./scripts/build.sh postgres && ./scripts/start.sh`
 
 ### Adding a new Kafka connector
 
-1. Add the `confluent-hub install` or `curl`+`unzip` step to `docker/Dockerfile.cpkafkaconnect`
-2. Add the connector JSON config to `config/debezium/`
-3. Register the new connector name and config path in the `SINK_CONNECTORS` or `SOURCE_CONNECTORS` array in `scripts/register_connector.sh`
-4. Run `./scripts/build.sh connect`, recreate the container, then `bash scripts/register_connector.sh`
+1. Add the `confluent-hub install` or `curl`+`unzip` step to `docker/Dockerfile.cp-kafka-connect`
+2. Add the connector JSON config to `config/kafka-connect/sink/` or `config/kafka-connect/source/`
+3. Create a registration script in `scripts/register-connectors/` following the pattern of `sink_minio.sh`
+4. Reference the new script from `scripts/register_connector.sh`
+5. Run `./scripts/build.sh connect`, recreate the container, then `bash scripts/register_connector.sh`
 
 ### Rebuilding a single image
 
@@ -535,7 +607,7 @@ Files are Hive-compatible Avro containers. Query directly with AWS Athena after 
 After rebuilding an image, recreate only the affected container:
 
 ```bash
-docker stop cdc-debezium && docker rm cdc-debezium
+docker stop cdc-kafka-connect && docker rm cdc-kafka-connect
 ./scripts/start.sh   # detects missing container, creates fresh one
 ```
 
@@ -544,19 +616,17 @@ Connector registrations survive container recreation — they are stored in the 
 ### Python development
 
 ```bash
-cd python
-
-# Edit config.py to point at local services
+# Edit python/config.py to point at local services
 # KAFKA_BOOTSTRAP = "localhost:9093"
 # SCHEMA_REGISTRY = "http://localhost:8081"
 
 # Run type checks (optional)
 pip install mypy
-mypy consumer.py simulate.py
+mypy python/consumer.py python/simulate.py
 
 # Format
 pip install black
-black .
+black python/
 ```
 
 ---
@@ -601,11 +671,11 @@ git diff --staged | grep -iE "AWS_|secret|password|key"
   ```bash
   bash scripts/register_connector.sh source --force
   ```
-- After changing `s3-sink-connector.json`, re-register with `--force`:
+- After changing a sink connector JSON, re-register with `--force`:
   ```bash
   bash scripts/register_connector.sh sink --force
   ```
-- After changing `Dockerfile.cpkafkaconnect`, rebuild and recreate the Connect container.
+- After changing `Dockerfile.cp-kafka-connect`, rebuild and recreate the Connect container.
 
 ### Commit message format
 
@@ -613,11 +683,11 @@ git diff --staged | grep -iE "AWS_|secret|password|key"
 type(scope): short description
 
 type:  feat | fix | docs | refactor | chore
-scope: kafka | postgres | connect | s3 | python | scripts | docker
+scope: kafka | postgres | connect | s3 | minio | python | scripts | docker
 
 Examples:
-  feat(connect): add S3 sink connector with Avro format
-  fix(postgres): set publication.autocreate.mode to disabled
+  feat(minio): add local S3 simulation with MinIO
+  fix(connect): set publication.autocreate.mode to disabled
   docs(readme): add operational reference section
   chore(scripts): make register_connector.sh idempotent
 ```
@@ -626,8 +696,9 @@ Examples:
 
 ```gitignore
 # Credentials — never commit these
-config/connect/aws-credentials.properties
-config/connect/aws.env
+env.minio
+env.aws
+config/kafka-connect/aws-credentials.properties
 
 # Python
 venv/
@@ -665,15 +736,35 @@ The consumer likely has a committed offset from a previous run. Run with `--from
 python python/consumer.py --from-beginning
 ```
 
-### S3 connector in FAILED state
+### MinIO sink connector in FAILED state
+
+```bash
+# Check the task error message
+curl -s http://localhost:8083/connectors/ecommerce-minio-sink/status | python3 -m json.tool
+
+# Common causes:
+# 1. env.minio credentials don't match MinIO server credentials
+docker exec cdc-kafka-connect env | grep AWS_
+docker exec cdc-minio env | grep MINIO_ROOT
+
+# 2. MinIO bucket does not exist — start.sh creates it automatically,
+#    but you can create it manually:
+docker run --rm --network cdc-network \
+  -e "MC_HOST_local=http://minioadmin:minioadmin123@cdc-minio:9000" \
+  minio/mc mb local/ecommerce-cdc
+
+# 3. MinIO container not running
+docker ps | grep cdc-minio
+```
+
+### AWS S3 connector in FAILED state
 
 ```bash
 # Check the task error message
 curl -s http://localhost:8083/connectors/ecommerce-s3-sink/status | python3 -m json.tool
 
-# Common causes:
 # 1. AWS credentials not set — verify env vars reached the container
-docker exec cdc-debezium env | grep AWS_
+docker exec cdc-kafka-connect env | grep AWS_
 
 # 2. S3 bucket does not exist or wrong region
 # 3. IAM user lacks s3:PutObject permission on the bucket
