@@ -207,6 +207,7 @@ else
         -p 8083:8083 \
         --restart unless-stopped \
         --env-file "$(pwd)/env.minio" \
+        -v "$(pwd)/config/kafka-connect/aws-credentials.properties:/etc/kafka-connect/aws-credentials.properties:ro" \
         cdc-kafka-connect:latest
 fi
 wait_for_http "http://localhost:8083/connectors" "Kafka Connect" 120

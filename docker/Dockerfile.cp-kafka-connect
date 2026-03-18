@@ -142,6 +142,17 @@ ENV CONNECT_VALUE_CONVERTER=org.apache.kafka.connect.json.JsonConverter
 ENV CONNECT_KEY_CONVERTER_SCHEMAS_ENABLE=false
 ENV CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE=false
 
+# ── Config providers (secret/file interpolation) ─────────────────────────────
+# Required to resolve ${file:/path/to/file.properties:key} syntax in connector
+# configs. Without this, the literal placeholder string is used as-is — no
+# error, no warning, just a wrong value (e.g. bucket name = the placeholder).
+#
+# CONNECT_CONFIG_PROVIDERS        → registers "file" as an alias
+# CONNECT_CONFIG_PROVIDERS_FILE_CLASS → points to the built-in provider that
+#                                       reads key=value from a .properties file
+ENV CONNECT_CONFIG_PROVIDERS=file
+ENV CONNECT_CONFIG_PROVIDERS_FILE_CLASS=org.apache.kafka.common.config.provider.FileConfigProvider
+
 # ── Offset flush interval ────────────────────────────────────────────────────
 # How often the WAL LSN cursor is persisted to debezium_connect_offsets.
 # 10s: worst-case replay window if Connect crashes mid-stream.
