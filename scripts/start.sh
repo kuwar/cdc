@@ -189,17 +189,34 @@ fi
 
 # ── Step 6: Kafka Connect (cp-kafka-connect) ──────────────────────────────────
 #
-# env.minio provides AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY to the
-# container. The AWS SDK inside the S3 connector reads these automatically
-# via the Default Credential Provider Chain. They map to MinIO root credentials.
+# TWO VARIANTS — only one docker run should be active at a time.
 #
-# To switch to real AWS S3: replace --env-file env.minio with --env-file env.aws
-# and update register_connector.sh to use ecommerce-s3-sink instead.
+# VARIANT A: MinIO (local, default)
+#   Uses env.minio for credentials (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY
+#   map to MinIO root credentials). The aws-credentials.properties file is
+#   still mounted so the FileConfigProvider can start cleanly, but the active
+#   connector uses minio-sink-connector.json which does not reference it.
+#
+# VARIANT B: AWS S3 (real cloud)
+#   Uses env.aws for real IAM credentials. The aws-credentials.properties file
+#   supplies s3.bucket.name and s3.region to s3-connector.json via
+#   FileConfigProvider (${file:...} interpolation).
+#   Prerequisites before switching:
+#     1. Populate env.aws with real AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY
+#     2. Populate config/kafka-connect/aws-credentials.properties with
+#        aws.s3.bucket.name and aws.s3.region
+#     3. Ensure the S3 bucket exists and the IAM user has s3:PutObject,
+#        s3:GetObject, s3:ListBucket, s3:AbortMultipartUpload,
+#        s3:ListMultipartUploadParts on that bucket
+#     4. In Step 7 below, switch register_connector.sh to use
+#        sink_aws_s3.sh instead of sink_minio.sh
 if docker container inspect cdc-kafka-connect > /dev/null 2>&1; then
     warn "cdc-kafka-connect already exists — starting if stopped..."
     docker start cdc-kafka-connect 2>/dev/null || true
 else
     log "Starting Kafka Connect..."
+
+    # VARIANT A: MinIO (active)
     docker run -d \
         --name cdc-kafka-connect \
         --network cdc-network \
@@ -209,6 +226,17 @@ else
         --env-file "$(pwd)/env.minio" \
         -v "$(pwd)/config/kafka-connect/aws-credentials.properties:/etc/kafka-connect/aws-credentials.properties:ro" \
         cdc-kafka-connect:latest
+
+    # VARIANT B: AWS S3 (inactive — comment out VARIANT A above and uncomment below)
+    # docker run -d \
+    #     --name cdc-kafka-connect \
+    #     --network cdc-network \
+    #     --hostname cdc-kafka-connect \
+    #     -p 8083:8083 \
+    #     --restart unless-stopped \
+    #     --env-file "$(pwd)/env.aws" \
+    #     -v "$(pwd)/config/kafka-connect/aws-credentials.properties:/etc/kafka-connect/aws-credentials.properties:ro" \
+    #     cdc-kafka-connect:latest
 fi
 wait_for_http "http://localhost:8083/connectors" "Kafka Connect" 120
 
