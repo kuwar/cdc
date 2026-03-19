@@ -22,11 +22,12 @@ log() { echo -e "${GREEN}[CDC]${NC} $*"; }
 
 TARGET="${1:-all}"
 
-build_kafka()    { log "Building cdc-kafka...";           docker build -f docker/Dockerfile.kafka           -t cdc-kafka:latest           .; }
-build_postgres() { log "Building cdc-postgres...";        docker build -f docker/Dockerfile.postgres        -t cdc-postgres:latest        .; }
+build_kafka()    { log "Building cdc-kafka...";           docker build -f docker/Dockerfile.kafka              -t cdc-kafka:latest           .; }
+build_postgres() { log "Building cdc-postgres...";        docker build -f docker/Dockerfile.postgres           -t cdc-postgres:latest        .; }
 build_registry() { log "Building cdc-schema-registry..."; docker build -f docker/Dockerfile.cp-schema-registry -t cdc-schema-registry:latest .; }
-build_connect()  { log "Building cdc-kafka-connect...";   docker build -f docker/Dockerfile.cp-kafka-connect  -t cdc-kafka-connect:latest   .; }
-build_minio()    { log "Building cdc-minio...";           docker build -f docker/Dockerfile.minio           -t cdc-minio:latest           .; }
+build_connect()  { log "Building cdc-kafka-connect...";   docker build -f docker/Dockerfile.cp-kafka-connect   -t cdc-kafka-connect:latest   .; }
+build_minio()    { log "Building cdc-minio...";           docker build -f docker/Dockerfile.minio              -t cdc-minio:latest           .; }
+build_ksqldb()   { log "Building cdc-ksqldb...";          docker build -f docker/Dockerfile.cp-ksqldb-server   -t cdc-ksqldb:latest          .; }
 
 case "$TARGET" in
     kafka)    build_kafka    ;;
@@ -34,16 +35,18 @@ case "$TARGET" in
     registry) build_registry ;;
     connect)  build_connect  ;;
     minio)    build_minio    ;;
+    ksqldb)   build_ksqldb   ;;
     all)
         build_kafka
         build_postgres
         build_registry
         build_connect
         build_minio
+        build_ksqldb
         log "All images built"
         ;;
     *)
-        echo "Usage: $0 [all|kafka|postgres|registry|connect|minio]"
+        echo "Usage: $0 [all|kafka|postgres|registry|connect|minio|ksqldb]"
         exit 1
         ;;
 esac

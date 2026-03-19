@@ -1,0 +1,123 @@
+# Dockerfile.cp-ksqldb-server
+#
+# ── WHAT IS ksqlDB ────────────────────────────────────────────────────────────
+#
+# ksqlDB is a streaming SQL engine built on top of Kafka Streams.
+# Instead of writing Java/Python consumer code, you write SQL to:
+#   - CREATE STREAM — continuous query over a Kafka topic (unbounded)
+#   - CREATE TABLE  — materialised view (latest value per key, changelog topic)
+#   - SELECT        — push query (live results) or pull query (point-in-time)
+#
+# In this CDC project ksqlDB sits downstream of Debezium:
+#
+#   PostgreSQL → Debezium → Kafka topics (Avro) → ksqlDB streams/tables
+#                                               └→ S3/MinIO sink (existing)
+#
+# You can JOIN streams, filter noise, flatten Debezium envelope fields, and
+# write enriched results to new topics consumed by dashboards or analytics.
+#
+# ── VERSION COMPATIBILITY ────────────────────────────────────────────────────
+#
+# ksqlDB 0.29.0 ships with an embedded Kafka Streams client (Apache Kafka 3.3).
+# The Kafka Streams client protocol is backward-compatible and connects to
+# Kafka 4.2.0 KRaft brokers without issues.
+#
+# ── ENV VAR TRANSLATION ──────────────────────────────────────────────────────
+#
+# The ksqldb-server image entrypoint translates env vars at startup:
+#   Strip "KSQL_" prefix → lowercase → replace "_" with "."
+#
+#   KSQL_BOOTSTRAP_SERVERS           → bootstrap.servers
+#   KSQL_LISTENERS                   → listeners
+#   KSQL_KSQL_SERVICE_ID             → ksql.service.id
+#   KSQL_KSQL_SCHEMA_REGISTRY_URL    → ksql.schema.registry.url
+#
+# Any KSQL_ var without a second KSQL_ prefix becomes a top-level Kafka
+# Streams property (bootstrap.servers, listeners).
+# Any KSQL_KSQL_ var becomes a ksql.* property (ksql.service.id, etc.).
+#
+# ── INTERNAL TOPICS ──────────────────────────────────────────────────────────
+#
+# ksqlDB creates Kafka topics for its own state:
+#   _confluent-ksql-<service.id>_command_topic   — DDL command log (persistent)
+#   _confluent-ksql-<service.id>_configs         — server config
+#   _confluent-ksql-<service.id>_processing_log  — processing error events
+#   <service.id><query.id>-<changelog>           — Kafka Streams state store topics
+#
+# Prefixing all topics with the service.id keeps them isolated if you ever
+# run multiple ksqlDB clusters against the same Kafka broker.
+
+FROM confluentinc/ksqldb-server:0.29.0
+
+# ── Kafka bootstrap ───────────────────────────────────────────────────────────
+# INTERNAL listener — container-to-container via Docker DNS (cdc-network).
+# Format: host:port only — no PLAINTEXT:// prefix (that is broker syntax,
+# not Kafka client bootstrap.servers format).
+ENV KSQL_BOOTSTRAP_SERVERS=cdc-kafka:9092
+
+# ── REST API listener ─────────────────────────────────────────────────────────
+# 0.0.0.0 = bind on all interfaces (reachable from other containers + host).
+# Port 8088 is the ksqlDB default.
+# The ksqlDB CLI connects here: ksql http://localhost:8088
+ENV KSQL_LISTENERS=http://0.0.0.0:8088
+
+# ── Service identity ──────────────────────────────────────────────────────────
+# Unique string that prefixes all ksqlDB-managed internal Kafka topics.
+# This isolates ksqlDB's topics from other services on the same broker.
+# Trailing underscore is a ksqlDB convention (it is appended to topic names).
+# Example: _confluent-ksql-cdc-ksqldb_command_topic
+ENV KSQL_KSQL_SERVICE_ID=cdc-ksqldb_
+
+# ── Schema Registry integration ───────────────────────────────────────────────
+# Required to deserialise Avro messages produced by Debezium.
+# Without this, ksqlDB cannot read your CDC topics — it would see raw bytes.
+#
+# When you CREATE STREAM over a Debezium topic with VALUE_FORMAT='AVRO',
+# ksqlDB fetches the schema from this URL, decodes the Avro binary, and
+# exposes individual fields as SQL columns.
+#
+# Must point to the Schema Registry container name on cdc-network.
+ENV KSQL_KSQL_SCHEMA_REGISTRY_URL=http://cdc-schema-registry:8081
+
+# ── Kafka Connect integration (optional) ─────────────────────────────────────
+# Enables ksqlDB to manage Kafka Connect connectors via SQL:
+#   CREATE SOURCE CONNECTOR / CREATE SINK CONNECTOR
+# Points to the existing cdc-kafka-connect REST API on cdc-network.
+# Remove or comment out if you prefer to register connectors via the shell
+# scripts (register_connector.sh) rather than through ksqlDB SQL.
+ENV KSQL_KSQL_CONNECT_URL=http://cdc-kafka-connect:8083
+
+# ── Stream auto offset reset ─────────────────────────────────────────────────
+# earliest: when a new ksqlDB query starts, read ALL existing messages in the
+# topic from the beginning (not just new ones arriving after query creation).
+#
+# This is the correct setting for CDC pipelines where you want full history
+# when replaying a stream or creating a new table.
+#
+# Equivalent to Kafka consumer auto.offset.reset=earliest.
+ENV KSQL_KSQL_STREAMS_AUTO_OFFSET_RESET=earliest
+
+# ── Replication factor for internal topics ────────────────────────────────────
+# Must be 1 for a single-broker setup (our dev environment has one Kafka node).
+# Increasing this without enough brokers causes topic creation to fail at startup.
+ENV KSQL_KSQL_STREAMS_REPLICATION_FACTOR=1
+ENV KSQL_KSQL_INTERNAL_TOPIC_REPLICAS=1
+
+# ── Processing log ────────────────────────────────────────────────────────────
+# The processing log captures runtime errors from stream processing queries
+# (e.g. deserialisation failures, null pointer exceptions in UDFs).
+#
+# AUTO_CREATE=true: ksqlDB creates the Kafka topic and ksqlDB stream
+# automatically on startup. Without this you must pre-create them manually.
+#
+# Inspect errors with:
+#   SELECT * FROM KSQL_PROCESSING_LOG EMIT CHANGES;
+ENV KSQL_KSQL_LOGGING_PROCESSING_STREAM_AUTO_CREATE=true
+ENV KSQL_KSQL_LOGGING_PROCESSING_TOPIC_AUTO_CREATE=true
+ENV KSQL_KSQL_LOGGING_PROCESSING_TOPIC_REPLICATION_FACTOR=1
+
+# ── EXPOSE ────────────────────────────────────────────────────────────────────
+# 8088 = ksqlDB REST API and CLI entrypoint.
+# Other containers on cdc-network reach port 8088 without -p (shared network).
+# Host access requires -p 8088:8088 in docker run (added in start.sh).
+EXPOSE 8088

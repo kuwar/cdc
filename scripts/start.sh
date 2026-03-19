@@ -60,8 +60,8 @@ wait_for_http() {
 # ── Optional clean wipe ───────────────────────────────────────────────────────
 if [[ "$CLEAN" == "--clean" ]]; then
     warn "Clean start: removing existing containers and volumes..."
-    docker stop  cdc-kafka-connect cdc-schema-registry cdc-postgres cdc-kafka cdc-minio 2>/dev/null || true
-    docker rm    cdc-kafka-connect cdc-schema-registry cdc-postgres cdc-kafka cdc-minio 2>/dev/null || true
+    docker stop  cdc-kafka-connect cdc-schema-registry cdc-postgres cdc-kafka cdc-minio cdc-ksqldb 2>/dev/null || true
+    docker rm    cdc-kafka-connect cdc-schema-registry cdc-postgres cdc-kafka cdc-minio cdc-ksqldb 2>/dev/null || true
     docker volume rm cdc-kafka-data cdc-postgres-data cdc-minio-data 2>/dev/null || true
     docker network rm cdc-network 2>/dev/null || true
     log "Clean wipe done"
@@ -105,7 +105,31 @@ else
 fi
 wait_for_http "http://localhost:8081/subjects" "Schema Registry" 90
 
-# ── Step 3: PostgreSQL ────────────────────────────────────────────────────────
+# ── Step 3: ksqlDB ───────────────────────────────────────────────────────────
+#
+# ksqlDB depends on Kafka (bootstrap) and Schema Registry (Avro decoding).
+# It must start AFTER both are healthy. PostgreSQL and Kafka Connect are not
+# required for ksqlDB itself — it only reads from Kafka topics.
+#
+# Port 8088: ksqlDB REST API. Connect from the host with:
+#   docker exec -it cdc-ksqldb ksql http://localhost:8088
+#   curl http://localhost:8088/info
+if docker container inspect cdc-ksqldb > /dev/null 2>&1; then
+    warn "cdc-ksqldb already exists — starting if stopped..."
+    docker start cdc-ksqldb 2>/dev/null || true
+else
+    log "Starting ksqlDB..."
+    docker run -d \
+        --name cdc-ksqldb \
+        --network cdc-network \
+        --hostname cdc-ksqldb \
+        -p 8088:8088 \
+        --restart unless-stopped \
+        cdc-ksqldb:latest
+fi
+wait_for_http "http://localhost:8088/info" "ksqlDB" 120
+
+# ── Step 4: PostgreSQL ────────────────────────────────────────────────────────
 if docker container inspect cdc-postgres > /dev/null 2>&1; then
     warn "cdc-postgres already exists — starting if stopped..."
     docker start cdc-postgres 2>/dev/null || true
@@ -128,11 +152,11 @@ until docker exec cdc-postgres pg_isready -U ecommerce_user -d ecommerce -q 2>/d
     sleep 2; echo -n "."; done; echo ""
 log "PostgreSQL is ready"
 
-# ── Step 4: Create Kafka topics (idempotent — --if-not-exists) ────────────────
+# ── Step 5: Create Kafka topics (idempotent — --if-not-exists) ────────────────
 log "Ensuring Kafka CDC topics exist..."
 bash scripts/create_topics.sh
 
-# ── Step 5: MinIO ─────────────────────────────────────────────────────────────
+# ── Step 6: MinIO ─────────────────────────────────────────────────────────────
 #
 # MinIO starts with credentials from minio.env (MINIO_ROOT_USER / MINIO_ROOT_PASSWORD).
 # The volume cdc-minio-data persists all objects across container restarts.
@@ -158,7 +182,7 @@ else
 fi
 wait_for_http "http://localhost:9000/minio/health/live" "MinIO" 60
 
-# ── Step 5a: Create MinIO bucket ──────────────────────────────────────────────
+# ── Step 6a: Create MinIO bucket ──────────────────────────────────────────────
 #
 # Bucket creation is a one-time operation. We use the official minio/mc image
 # (MinIO Client) as a one-shot container — it connects to cdc-minio, creates
@@ -187,7 +211,7 @@ else
     warn "Bucket ecommerce-cdc already exists — skipping creation"
 fi
 
-# ── Step 6: Kafka Connect (cp-kafka-connect) ──────────────────────────────────
+# ── Step 7: Kafka Connect (cp-kafka-connect) ──────────────────────────────────
 #
 # TWO VARIANTS — only one docker run should be active at a time.
 #
@@ -208,7 +232,7 @@ fi
 #     3. Ensure the S3 bucket exists and the IAM user has s3:PutObject,
 #        s3:GetObject, s3:ListBucket, s3:AbortMultipartUpload,
 #        s3:ListMultipartUploadParts on that bucket
-#     4. In Step 7 below, switch register_connector.sh to use
+#     4. In Step 8 below, switch register_connector.sh to use
 #        sink_aws_s3.sh instead of sink_minio.sh
 if docker container inspect cdc-kafka-connect > /dev/null 2>&1; then
     warn "cdc-kafka-connect already exists — starting if stopped..."
@@ -240,7 +264,7 @@ else
 fi
 wait_for_http "http://localhost:8083/connectors" "Kafka Connect" 120
 
-# ── Step 7: Register connectors (skips any already RUNNING) ───────────────────
+# ── Step 8: Register connectors (skips any already RUNNING) ───────────────────
 log "Checking connector registration..."
 bash scripts/register_connector.sh
 
@@ -253,6 +277,7 @@ log "   Kafka           → localhost:9093"
 log "   Schema Registry → http://localhost:8081"
 log "   PostgreSQL      → localhost:5432  (db: ecommerce)"
 log "   Kafka Connect   → http://localhost:8083"
+log "   ksqlDB          → http://localhost:8088"
 log "   MinIO S3 API    → http://localhost:9000"
 log "   MinIO Console   → http://localhost:9001  ← browse your data here"
 log ""
@@ -263,6 +288,9 @@ log ""
 log " Connector status:"
 log "   curl http://localhost:8083/connectors/ecommerce-postgres-cdc/status"
 log "   curl http://localhost:8083/connectors/ecommerce-minio-sink/status"
+log ""
+log " ksqlDB CLI:"
+log "   docker exec -it cdc-ksqldb ksql http://localhost:8088"
 log ""
 log " Run simulation:  python python/simulate.py"
 log " Run consumer:    python python/consumer.py"
