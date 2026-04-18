@@ -51,10 +51,14 @@ Kafka Topics (one per table)
     │
     ├──▶  Python Consumer    (real-time terminal output)
     │
-    └──▶  S3 Sink Connector  (partitioned Avro files)
-              │
-              ├──▶  MinIO  (default — local S3-compatible storage)
-              └──▶  AWS S3 (optional — real cloud sink)
+    ├──▶  S3 Sink Connector  (partitioned Avro files)
+    │         │
+    │         ├──▶  MinIO  (default — local S3-compatible storage)
+    │         └──▶  AWS S3 (optional — real cloud sink)
+    │
+    └──▶  ksqlDB             (streaming SQL over CDC topics)
+              │  CREATE STREAM / TABLE / SELECT
+              └──▶  ksqlDB CLI  (interactive SQL shell)
 ```
 
 ---
@@ -91,9 +95,16 @@ Kafka Topics (one per table)
 │  ┌──────────────────────┐           │     products              │  │
 │  │  cdc-minio           │◀──────────│   ecommerce.public.       │  │
 │  │  MinIO (S3-compat.)  │  objects  │     order_items           │  │
-│  │  :9000 (S3 API)      │           └───────────────────────────┘  │
-│  │  :9001 (Console)     │                                           │
-│  └──────────────────────┘                                           │
+│  │  :9000 (S3 API)      │           └─────────────┬─────────────┘  │
+│  │  :9001 (Console)     │                         │                 │
+│  └──────────────────────┘           ┌─────────────▼─────────────┐  │
+│                                     │  cdc-ksqldb               │  │
+│  ┌──────────────────────┐           │  ksqldb-server:0.29.0     │  │
+│  │  cdc-ksqldb-cli      │──────────▶│  :8088 (REST API / CLI)   │  │
+│  │  ksqldb-cli:0.29.0   │  SQL      │                           │  │
+│  │  (interactive shell) │           │  Streams / Tables over    │  │
+│  └──────────────────────┘           │  CDC Kafka topics (Avro)  │  │
+│                                     └───────────────────────────┘  │
 └─────────────────────────────────────────────────────────────────────┘
 
   Host machine:
@@ -162,6 +173,8 @@ Every Kafka message produced by Debezium follows this Avro envelope:
 | Cloud sink connector | Confluent S3 Sink Connector         | 12.1.1   |
 | Local object storage | MinIO (S3-compatible)               | latest   |
 | Cloud storage        | AWS S3 (optional)                   | —        |
+| Streaming SQL engine | Confluent ksqlDB Server             | 0.29.0   |
+| Streaming SQL CLI    | Confluent ksqlDB CLI                | 0.29.0   |
 | Python Kafka client  | confluent-kafka                     | 2.13.2   |
 | Container runtime    | Docker                              | 29.1.3   |
 
@@ -179,7 +192,9 @@ cdc/
 │   ├── Dockerfile.cp-kafka-connect  # cp-kafka-connect:8.2.0
 │   │                                #   + Debezium PG Source (Maven Central)
 │   │                                #   + S3 Sink (Confluent Hub)
-│   └── Dockerfile.minio             # MinIO local S3 server
+│   ├── Dockerfile.minio             # MinIO local S3 server
+│   ├── Dockerfile.cp-ksqldb-server  # ksqlDB server 0.29.0
+│   └── Dockerfile.cp-ksqldb-cli     # ksqlDB CLI 0.29.0 (interactive shell)
 │
 ├── config/
 │   ├── postgres/
@@ -508,6 +523,7 @@ bash scripts/register-connectors/sink_aws_s3.sh     [--force]
 | Schema Registry      | `http://localhost:8081` | Schema CRUD, compatibility checks    |
 | PostgreSQL           | `localhost:5432`        | DB: `ecommerce`, user: `ecommerce_user` |
 | Kafka Connect        | `http://localhost:8083` | Connector REST API                   |
+| ksqlDB               | `http://localhost:8088` | Streaming SQL REST API               |
 | MinIO S3 API         | `http://localhost:9000` | S3-compatible object storage         |
 | MinIO Console        | `http://localhost:9001` | Web UI — browse stored Avro files    |
 
@@ -559,6 +575,48 @@ docker exec cdc-kafka /opt/kafka/bin/kafka-console-consumer.sh \
   --from-beginning
 ```
 
+### ksqlDB CLI reference
+
+Connect the interactive SQL shell to the running ksqlDB server:
+
+```bash
+# Using the built CLI image (connects via cdc-network)
+docker run --rm -it \
+  --network cdc-network \
+  cdc-ksqldb-cli:latest
+
+# Override the server URL if needed
+docker run --rm -it \
+  --network cdc-network \
+  cdc-ksqldb-cli:latest http://cdc-ksqldb:8088
+```
+
+Common ksqlDB commands once inside the shell:
+
+```sql
+-- List all streams and tables
+SHOW STREAMS;
+SHOW TABLES;
+
+-- Inspect a CDC topic in real time (raw Kafka view)
+PRINT 'ecommerce.public.orders' FROM BEGINNING;
+
+-- Create a stream over a Debezium Avro topic
+CREATE STREAM orders_stream WITH (
+  KAFKA_TOPIC  = 'ecommerce.public.orders',
+  VALUE_FORMAT = 'AVRO'
+);
+
+-- Push query — live results as events arrive
+SELECT * FROM orders_stream EMIT CHANGES;
+
+-- Describe a stream's schema
+DESCRIBE orders_stream EXTENDED;
+
+-- Check ksqlDB server health
+curl -s http://localhost:8088/info | python3 -m json.tool
+```
+
 ### MinIO output layout
 
 ```
@@ -597,11 +655,13 @@ Files are Hive-compatible Avro containers, identical in format to the AWS S3 out
 ### Rebuilding a single image
 
 ```bash
-./scripts/build.sh kafka       # rebuild only Kafka image
-./scripts/build.sh postgres    # rebuild only PostgreSQL image
-./scripts/build.sh registry    # rebuild only Schema Registry image
-./scripts/build.sh connect     # rebuild only Kafka Connect image (most common)
-./scripts/build.sh             # rebuild all
+./scripts/build.sh kafka        # rebuild only Kafka image
+./scripts/build.sh postgres     # rebuild only PostgreSQL image
+./scripts/build.sh registry     # rebuild only Schema Registry image
+./scripts/build.sh connect      # rebuild only Kafka Connect image (most common)
+./scripts/build.sh ksqldb       # rebuild only ksqlDB server image
+./scripts/build.sh ksqldb-cli   # rebuild only ksqlDB CLI image
+./scripts/build.sh              # rebuild all
 ```
 
 After rebuilding an image, recreate only the affected container:

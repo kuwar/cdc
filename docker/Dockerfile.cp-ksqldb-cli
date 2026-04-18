@@ -1,0 +1,30 @@
+# Dockerfile.cp-ksqldb-cli
+#
+# ── WHAT IS ksqlDB CLI ────────────────────────────────────────────────────────
+#
+# The ksqlDB CLI is an interactive SQL shell that connects to a running
+# ksqlDB server over its REST API (port 8088).
+#
+# Common uses in this CDC pipeline:
+#   - Run ad-hoc queries:  SELECT * FROM orders_stream EMIT CHANGES;
+#   - Inspect CDC topics:  PRINT 'cdc.public.orders' FROM BEGINNING;
+#   - Create streams/tables interactively before promoting them to scripts
+#   - Describe schemas:    DESCRIBE orders_stream EXTENDED;
+#
+# ── VERSION PINNING ───────────────────────────────────────────────────────────
+#
+# CLI version MUST match the ksqlDB server version (0.29.0) to avoid
+# protocol mismatches.  Both images use the same release tag.
+#
+# Server Dockerfile: docker/Dockerfile.cp-ksqldb-server (0.29.0)
+# CLI image tag   : confluentinc/ksqldb-cli:0.29.0
+
+FROM confluentinc/ksqldb-cli:0.29.0
+
+# ── Default server endpoint ───────────────────────────────────────────────────
+# The CLI binary is /usr/bin/ksql. ENTRYPOINT must be set explicitly because
+# the base image does not define one, so CMD alone would be treated as the
+# executable.  Override the server URL at runtime:
+#   docker run cdc-ksqldb-cli http://other-host:8088
+ENTRYPOINT ["/usr/bin/ksql"]
+CMD ["http://cdc-ksqldb-server:8088"]

@@ -60,8 +60,8 @@ wait_for_http() {
 # ── Optional clean wipe ───────────────────────────────────────────────────────
 if [[ "$CLEAN" == "--clean" ]]; then
     warn "Clean start: removing existing containers and volumes..."
-    docker stop  cdc-kafka-connect cdc-schema-registry cdc-postgres cdc-kafka cdc-minio cdc-ksqldb 2>/dev/null || true
-    docker rm    cdc-kafka-connect cdc-schema-registry cdc-postgres cdc-kafka cdc-minio cdc-ksqldb 2>/dev/null || true
+    docker stop  cdc-kafka-connect cdc-schema-registry cdc-postgres cdc-kafka cdc-minio cdc-ksqldb-server 2>/dev/null || true
+    docker rm    cdc-kafka-connect cdc-schema-registry cdc-postgres cdc-kafka cdc-minio cdc-ksqldb-server 2>/dev/null || true
     docker volume rm cdc-kafka-data cdc-postgres-data cdc-minio-data 2>/dev/null || true
     docker network rm cdc-network 2>/dev/null || true
     log "Clean wipe done"
@@ -112,17 +112,17 @@ wait_for_http "http://localhost:8081/subjects" "Schema Registry" 90
 # required for ksqlDB itself — it only reads from Kafka topics.
 #
 # Port 8088: ksqlDB REST API. Connect from the host with:
-#   docker exec -it cdc-ksqldb ksql http://localhost:8088
+#   docker exec -it cdc-ksqldb-server ksql http://localhost:8088
 #   curl http://localhost:8088/info
-if docker container inspect cdc-ksqldb > /dev/null 2>&1; then
-    warn "cdc-ksqldb already exists — starting if stopped..."
-    docker start cdc-ksqldb 2>/dev/null || true
+if docker container inspect cdc-ksqldb-server > /dev/null 2>&1; then
+    warn "cdc-ksqldb-server already exists — starting if stopped..."
+    docker start cdc-ksqldb-server 2>/dev/null || true
 else
     log "Starting ksqlDB..."
     docker run -d \
-        --name cdc-ksqldb \
+        --name cdc-ksqldb-server \
         --network cdc-network \
-        --hostname cdc-ksqldb \
+        --hostname cdc-ksqldb-server \
         -p 8088:8088 \
         --restart unless-stopped \
         cdc-ksqldb:latest
@@ -290,7 +290,7 @@ log "   curl http://localhost:8083/connectors/ecommerce-postgres-cdc/status"
 log "   curl http://localhost:8083/connectors/ecommerce-minio-sink/status"
 log ""
 log " ksqlDB CLI:"
-log "   docker exec -it cdc-ksqldb ksql http://localhost:8088"
+log "   docker exec -it cdc-ksqldb-server ksql http://localhost:8088"
 log ""
 log " Run simulation:  python python/simulate.py"
 log " Run consumer:    python python/consumer.py"
